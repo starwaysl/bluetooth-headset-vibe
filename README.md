@@ -30,7 +30,7 @@
 ### 2. 安装
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/bluetooth-headset-vibe.git
+git clone https://github.com/starwaysl/bluetooth-headset-vibe.git
 cd bluetooth-headset-vibe
 pip install -r requirements.txt
 ```
@@ -130,8 +130,14 @@ bluetooth-headset-vibe/
 │   ├── ai_client.py           # Claude/OpenAI API 客户端
 │   └── clipboard.py           # 剪贴板操作
 └── assets/
-    └── demo.gif
+    └── demo.gif               # 演示动图（待补）
 ```
+
+<!-- DEMO_START -->
+<!-- 在此插入演示 GIF：建议展示一次完整交互（按住→说话→松开→双击→AI回复） -->
+<!-- 推荐大小：宽度 600px，LICEcap 或 Kap 录制 -->
+<!-- 上传路径：assets/，文件名 demo.gif -->
+<!-- DEMO_END -->
 
 ---
 
