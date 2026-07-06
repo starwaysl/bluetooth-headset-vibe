@@ -1,0 +1,46 @@
+# Bluetooth Headset Vibe 配置文件
+# 复制为 config.yaml 并修改为你自己的设置
+
+keyboard_shortcut:
+  # 输入法的语音输入快捷键
+  # 格式：用 + 连接修饰符和键名
+  # 修饰符：cmd, opt, ctrl, shift
+  # 键名：a-z, 0-9, space, return, tab 等
+  #
+  # 常见输入法默认快捷键：
+  #   微信输入法：opt+cmd+s
+  #   豆包输入法：（请在输入法设置中查看）
+  #   讯飞输入法：（请在输入法设置中查看）
+  voice_input: "opt+cmd+s"
+
+# AI 后端配置
+ai:
+  # 可选：claude | openai | custom
+  provider: "claude"
+
+  # API Key
+  # Claude: 从 https://console.anthropic.com/settings/keys 获取
+  # OpenAI: 从 https://platform.openai.com/api-keys 获取
+  api_key: "YOUR_API_KEY_HERE"
+
+  # 模型选择
+  # Claude: claude-opus-4-8 | claude-sonnet-5 | claude-haiku-4-5-20251001
+  # OpenAI: gpt-4o | gpt-4o-mini
+  model: "claude-sonnet-5"
+
+  # 仅当 provider 为 custom 时使用
+  # base_url: "https://your-compatible-api.com/v1"
+
+# 双击检测
+double_click:
+  # 两次按键的最大间隔（毫秒），超过则不算双击
+  max_interval_ms: 350
+
+# AI 系统提示词
+system_prompt: |
+  你是一个 Vibe Coding 助手。用户通过语音输入描述他们想要的代码操作。
+  请用简洁的中文回答，直接给出代码片段或操作指令，不要废话。
+  如果用户的请求不明确，主动询问细节。
+
+# 调试模式（开启后打印详细日志）
+debug: false
