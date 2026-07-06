@@ -1,11 +1,8 @@
 # Bluetooth Headset Vibe — Python 依赖
 # 安装：pip install -r requirements.txt
 
-# macOS 系统事件（监听 + 模拟按键）
-pyobjc-core>=10.0
-pyobjc-framework-Quartz>=10.0
-pyobjc-framework-Cocoa>=10.0
-pyobjc-framework-ApplicationServices>=10.0
+# 键盘监听 + 模拟（跨平台，支持蓝牙 HID 键盘）
+pynput>=1.7.0
 
 # 配置文件
 PyYAML>=6.0

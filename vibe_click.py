@@ -2,7 +2,12 @@
 """
 Bluetooth Headset Vibe — 主入口
 
-用蓝牙耳机按键触发语音输入 + 双击发给 AI。
+用蓝牙遥控器（或其他 HID 键盘设备）的按键触发语音输入 + 发给 AI。
+
+工作原理：
+  1. 用 pynput 全局监听键盘事件
+  2. 当检测到触发键（如 F5、回车）时，模拟输入法的语音快捷键
+  3. 当检测到发送键（如右 Command）时，复制当前输入框文字 → 发给 AI → 结果写入剪贴板
 
 用法：
     python vibe_click.py                # 使用默认 config.yaml
@@ -26,13 +31,10 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.event_listener import (
-    EventListener,
-    AccessibilityPermissionError,
-    EventTapDisabledError,
-)
+from pynput import keyboard
+from pynput.keyboard import Key, KeyCode
+
 from core.key_simulator import KeySimulator
-from core.voice_trigger import VoiceTrigger, VoiceTriggerConfig
 from core.ai_client import AIClient, AIClientError
 from core.clipboard import set_text
 
@@ -60,11 +62,15 @@ def load_config(config_path: str) -> dict:
 
 def validate_config(config: dict) -> None:
     """验证配置完整性。"""
-    required_keys = ["keyboard_shortcut", "ai"]
+    required_keys = ["triggers", "keyboard_shortcut", "ai"]
     for key in required_keys:
         if key not in config:
             raise ValueError(f"配置缺少必要字段: '{key}'")
 
+    if "voice_input" not in config["triggers"]:
+        raise ValueError("triggers.voice_input 未配置")
+    if "send_to_ai" not in config["triggers"]:
+        raise ValueError("triggers.send_to_ai 未配置")
     if "voice_input" not in config["keyboard_shortcut"]:
         raise ValueError("keyboard_shortcut.voice_input 未配置")
 
@@ -93,6 +99,35 @@ def setup_logging(debug: bool = False) -> None:
     logging.getLogger("requests").setLevel(logging.WARNING)
 
 
+# ── 按键解析工具 ──────────────────────────────────────────
+
+def parse_trigger_key(trigger_str: str) -> Key | KeyCode:
+    """
+    把配置里的触发键字符串（如 "Key.f5"、"Key.enter"）解析为 pynput Key/KeyCode。
+
+    支持格式：
+      - "Key.f5"       → Key.f5
+      - "Key.enter"    → Key.enter
+      - "Key.cmd_r"    → Key.cmd_r
+      - "a"            → KeyCode.from_char("a")
+      - "1"            → KeyCode.from_char("1")
+    """
+    s = trigger_str.strip()
+
+    # Key.xxx 格式
+    if s.startswith("Key."):
+        key_name = s[4:]
+        if hasattr(Key, key_name):
+            return getattr(Key, key_name)
+        raise ValueError(f"未知的 Key 名称: '{key_name}'。可用: {[k for k in dir(Key) if not k.startswith('_')]}")
+
+    # 单字符
+    if len(s) == 1:
+        return KeyCode.from_char(s)
+
+    raise ValueError(f"无法解析触发键: '{trigger_str}'。请使用 Key.xxx 格式（如 Key.f5）")
+
+
 # ── 主程序 ────────────────────────────────────────────────
 
 class VibeApp:
@@ -107,13 +142,12 @@ class VibeApp:
         # 按键模拟
         self.simulator = KeySimulator()
 
-        # 语音触发状态机
-        trigger_config = VoiceTriggerConfig(
-            double_click_max_interval_ms=self.config.get("double_click", {}).get(
-                "max_interval_ms", 350
-            ),
-        )
-        self.trigger = VoiceTrigger(trigger_config)
+        # 解析触发键
+        self.voice_trigger_key = parse_trigger_key(self.config["triggers"]["voice_input"])
+        self.ai_trigger_key = parse_trigger_key(self.config["triggers"]["send_to_ai"])
+
+        # 快捷键字符串
+        self.shortcut = self.config["keyboard_shortcut"]["voice_input"]
 
         # AI 客户端
         ai_cfg = self.config["ai"]
@@ -125,33 +159,66 @@ class VibeApp:
             base_url=ai_cfg.get("base_url"),
         )
 
-        # 快捷键字符串
-        self.shortcut = self.config["keyboard_shortcut"]["voice_input"]
+        # 状态：当前是否正在录音（按着语音键）
+        self._is_recording = False
+        # 防抖：上次触发 AI 的时间
+        self._last_ai_trigger = 0.0
 
-        # 绑定回调
-        self.trigger.set_callbacks(
-            on_start_recording=self._on_start_recording,
-            on_stop_recording=self._on_stop_recording,
-            on_send_to_ai=self._on_send_to_ai,
-        )
+    # ── 按键事件处理 ──────────────────────────────────────
 
-    # ── 回调实现 ──────────────────────────────────────────
+    def on_press(self, key) -> None:
+        """按键按下事件。"""
+        logger.debug(f"按下: {key!r}")
 
-    def _on_start_recording(self) -> None:
-        """开始录音：模拟快捷键触发输入法语音输入。"""
-        logger.info("🎤 开始录音（触发语音输入）...")
-        self.simulator.press_shortcut(self.shortcut)
+        if key == self.voice_trigger_key:
+            # 触发语音输入：按下快捷键
+            logger.info("🎤 触发语音输入...")
+            self.simulator.press_shortcut(self.shortcut)
+            self._is_recording = True
 
-    def _on_stop_recording(self) -> None:
-        """停止录音：释放快捷键。"""
-        self.simulator.release_shortcut(self.shortcut)
-        logger.info("📝 录音结束，等待输入法转文字...")
+        elif key == self.ai_trigger_key:
+            # 防抖：避免连续触发
+            now = time.monotonic()
+            if now - self._last_ai_trigger < 0.5:
+                return
+            self._last_ai_trigger = now
+            self._send_to_ai()
 
-    def _on_send_to_ai(self, text: str) -> None:
-        """把文字发给 AI，结果写入剪贴板。"""
-        logger.info(f"🤖 发给 AI: {text[:80]}{'...' if len(text) > 80 else ''}")
+    def on_release(self, key) -> None:
+        """按键释放事件。"""
+        logger.debug(f"释放: {key!r}")
 
+        if key == self.voice_trigger_key and self._is_recording:
+            # 释放语音键：松开快捷键
+            self.simulator.release_shortcut(self.shortcut)
+            self._is_recording = False
+            logger.info("📝 语音输入结束，等待文字输入编辑器...")
+
+    # ── 发给 AI ──────────────────────────────────────────
+
+    def _send_to_ai(self) -> None:
+        """复制当前输入框文字 → 发给 AI → 结果写入剪贴板。"""
+        logger.info("🤖 准备发给 AI...")
+
+        # 在新线程中执行，避免阻塞键盘监听
+        import threading
+        threading.Thread(target=self._do_send_to_ai, daemon=True).start()
+
+    def _do_send_to_ai(self) -> None:
+        """实际执行发给 AI 的逻辑。"""
         try:
+            from core.clipboard import get_selected_text_via_copy
+
+            # 模拟 Cmd+C 复制当前选中文本
+            text = get_selected_text_via_copy()
+            if not text or not text.strip():
+                logger.warning("⚠️ 剪贴板为空，没有内容可发给 AI")
+                logger.warning("   请先在编辑器里输入文字，再按发送键")
+                return
+
+            text = text.strip()
+            logger.info(f"发给 AI ({len(text)} 字符): {text[:80]}{'...' if len(text) > 80 else ''}")
+
             response = self.ai_client.chat(text)
             logger.info(f"✅ AI 回复 ({response.latency_ms}ms): {response.text[:120]}...")
 
@@ -168,45 +235,43 @@ class VibeApp:
 
     def run(self) -> None:
         """启动应用（阻塞）。"""
-        listener = EventListener(suppress_system_events=True)
-        listener.on_press = self.trigger.handle_key_down
-        listener.on_release = self.trigger.handle_key_up
-
         print()
         print("=" * 50)
         print("  🎧 Bluetooth Headset Vibe 已启动")
         print("=" * 50)
         print()
-        print(f"  快捷键: {self.shortcut}")
+        print(f"  语音触发键: {self.config['triggers']['voice_input']}")
+        print(f"  AI 发送键:  {self.config['triggers']['send_to_ai']}")
+        print(f"  输入法快捷键: {self.shortcut}")
         print(f"  AI 模型: {self.config['ai'].get('model', 'default')}")
         print()
         print("  操作说明：")
-        print("    按住耳机键 → 语音输入")
-        print("    松开耳机键 → 结束语音")
-        print("    双击耳机键 → 发给 AI")
+        print("    按语音键 → 启动微信语音输入")
+        print("    松语音键 → 结束语音，文字输入编辑器")
+        print("    按 AI 键 → 复制文字 → 发给 Claude → 结果写入剪贴板")
         print()
         print("  按 Ctrl+C 退出")
         print()
         print("=" * 50)
         print()
 
-        try:
-            listener.start()
-        except AccessibilityPermissionError as e:
-            logger.error(str(e))
-            sys.exit(1)
-        except EventTapDisabledError as e:
-            logger.error(str(e))
-            sys.exit(1)
-        except KeyboardInterrupt:
-            print("\n👋 再见！")
+        with keyboard.Listener(
+            on_press=self.on_press,
+            on_release=self.on_release,
+        ) as listener:
+            try:
+                listener.join()
+            except KeyboardInterrupt:
+                pass
+
+        print("\n👋 再见！")
 
 
 # ── 命令行入口 ────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bluetooth Headset Vibe — 蓝牙耳机变 Vibe Coding 控制器"
+        description="Bluetooth Headset Vibe — 蓝牙遥控器变 Vibe Coding 控制器"
     )
     parser.add_argument(
         "-c", "--config",
@@ -232,13 +297,6 @@ def main():
         print("🔍 环境检查")
         print()
 
-        # 检查辅助功能权限
-        if EventListener.check_accessibility_permission():
-            print("  ✅ 辅助功能权限：已授权")
-        else:
-            print("  ❌ 辅助功能权限：未授权")
-            print("     请打开：系统设置 → 隐私与安全性 → 辅助功能")
-
         # 检查配置文件
         config_path = Path(args.config)
         if config_path.exists():
@@ -253,23 +311,17 @@ def main():
             print(f"  ⚠️  配置文件不存在：{config_path}")
 
         # 检查依赖
-        try:
-            import Quartz
-            print("  ✅ pyobjc-framework-Quartz 已安装")
-        except ImportError:
-            print("  ❌ pyobjc-framework-Quartz 未安装")
-
-        try:
-            import yaml
-            print("  ✅ PyYAML 已安装")
-        except ImportError:
-            print("  ❌ PyYAML 未安装")
-
-        try:
-            import requests
-            print("  ✅ requests 已安装")
-        except ImportError:
-            print("  ❌ requests 未安装")
+        for pkg, name in [
+            ("pynput", "pynput"),
+            ("yaml", "PyYAML"),
+            ("requests", "requests"),
+            ("pyperclip", "pyperclip"),
+        ]:
+            try:
+                __import__(pkg)
+                print(f"  ✅ {name} 已安装")
+            except ImportError:
+                print(f"  ❌ {name} 未安装")
 
         return
 
